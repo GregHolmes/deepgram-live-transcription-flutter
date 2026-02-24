@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
-import 'dart:convert';
-import 'package:sound_stream/sound_stream.dart';
-import 'package:web_socket_channel/io.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:record/record.dart';
+import 'package:deepgram_speech_to_text/deepgram_speech_to_text.dart';
 
-const serverUrl = '<Deepgram WebSocket URL>';
+// You should not commit your Deepgram API key.
+// We're using apiKey here for simplicity and tutorial purposes.
+// This should be received from a secure backend in production applications.
 const apiKey = '<Your Deepgram API key>';
 
 void main() {
@@ -13,7 +13,7 @@ void main() {
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({Key? key}) : super(key: key);
+  const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -28,7 +28,7 @@ class MyApp extends StatelessWidget {
 }
 
 class MyHomePage extends StatefulWidget {
-  const MyHomePage({Key? key, required this.title}) : super(key: key);
+  const MyHomePage({super.key, required this.title});
   final String title;
 
   @override
@@ -37,78 +37,79 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   String myText = "To start transcribing your voice, press start.";
+  bool _isRecording = false;
 
-  final RecorderStream _recorder = RecorderStream();
+  final AudioRecorder _recorder = AudioRecorder();
+  final Deepgram _deepgram = Deepgram(apiKey);
 
-  late StreamSubscription _recorderStatus;
-  late StreamSubscription _audioStream;
-
-  late IOWebSocketChannel channel;
+  StreamSubscription? _transcriptionSub;
 
   @override
   void initState() {
     super.initState();
-
-    WidgetsBinding.instance?.addPostFrameCallback(onLayoutDone);
+    WidgetsBinding.instance.addPostFrameCallback(onLayoutDone);
   }
 
   @override
   void dispose() {
-    _recorderStatus.cancel();
-    _audioStream.cancel();
-    channel.sink.close();
-
+    _transcriptionSub?.cancel();
+    _recorder.stop();
+    _recorder.dispose();
     super.dispose();
   }
 
-  Future<void> _initStream() async {
-    channel = IOWebSocketChannel.connect(Uri.parse(serverUrl),
-        headers: {'Authorization': 'Token $apiKey'});
+  void _startRecord() async {
+    if (_isRecording) return;
 
-    channel.stream.listen((event) async {
-      final parsedJson = jsonDecode(event);
+    resetText();
 
-      updateText(parsedJson['channel']['alternatives'][0]['transcript']);
-    });
+    final audioStream = await _recorder.startStream(
+      const RecordConfig(
+        encoder: AudioEncoder.pcm16bits,
+        sampleRate: 16000,
+        numChannels: 1,
+      ),
+    );
 
-    _audioStream = _recorder.audioStream.listen((data) {
-      channel.sink.add(data);
-    });
+    final resultStream = _deepgram.listen.live(
+      audioStream,
+      queryParams: {
+        'language': 'en',
+        'encoding': 'linear16',
+        'sample_rate': 16000,
+      },
+    );
 
-    _recorderStatus = _recorder.status.listen((status) {
-      if (mounted) {
-        setState(() {});
+    _transcriptionSub = resultStream.listen((result) {
+      final transcript = result.transcript ?? '';
+      if (transcript.isNotEmpty) {
+        updateText(transcript);
       }
     });
 
-    await Future.wait([
-      _recorder.initialize(),
-    ]);
-  }
-
-  void _startRecord() async {
-    resetText();
-    _initStream();
-
-    await _recorder.start();
-
-    setState(() {});
+    setState(() {
+      _isRecording = true;
+    });
   }
 
   void _stopRecord() async {
     await _recorder.stop();
+    await _transcriptionSub?.cancel();
+    _transcriptionSub = null;
 
-    setState(() {});
+    setState(() {
+      _isRecording = false;
+    });
   }
 
   void onLayoutDone(Duration timeStamp) async {
-    await Permission.microphone.request();
+    await _recorder.hasPermission();
     setState(() {});
   }
 
-  void updateText(newText) {
+  void updateText(String newText) {
     setState(() {
-      myText = myText + ' ' + newText;
+      myText = '$myText $newText';
     });
   }
 
@@ -120,69 +121,60 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      home: Scaffold(
-        appBar: AppBar(
-          title: const Text('Live Transcription with Deepgram'),
-        ),
-        body: Column(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-          children: [
-            Row(
-              children: <Widget>[
-                Expanded(
-                  flex: 3,
-                  child: SizedBox(
-                    width: 150,
-                    child: Text(
-                      myText,
-                      textAlign: TextAlign.center,
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 50,
-                      style: const TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 15),
-                    ),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Live Transcription with Deepgram'),
+      ),
+      body: Column(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          Row(
+            children: <Widget>[
+              Expanded(
+                flex: 3,
+                child: SizedBox(
+                  width: 150,
+                  child: Text(
+                    myText,
+                    textAlign: TextAlign.center,
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 50,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.bold, fontSize: 15),
                   ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Center(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: <Widget>[
+                OutlinedButton(
+                  style: ButtonStyle(
+                    backgroundColor:
+                        WidgetStateProperty.all<Color>(Colors.blue),
+                    foregroundColor:
+                        WidgetStateProperty.all<Color>(Colors.white),
+                  ),
+                  onPressed: _isRecording ? null : () => _startRecord(),
+                  child: const Text('Start', style: TextStyle(fontSize: 30)),
+                ),
+                const SizedBox(width: 5),
+                OutlinedButton(
+                  style: ButtonStyle(
+                    backgroundColor: WidgetStateProperty.all<Color>(Colors.red),
+                    foregroundColor:
+                        WidgetStateProperty.all<Color>(Colors.white),
+                  ),
+                  onPressed: _isRecording ? () => _stopRecord() : null,
+                  child: const Text('Stop', style: TextStyle(fontSize: 30)),
                 ),
               ],
             ),
-            const SizedBox(height: 20),
-            Center(
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: <Widget>[
-                  OutlinedButton(
-                    style: ButtonStyle(
-                      backgroundColor:
-                          MaterialStateProperty.all<Color>(Colors.blue),
-                      foregroundColor:
-                          MaterialStateProperty.all<Color>(Colors.white),
-                    ),
-                    onPressed: () {
-                      updateText('');
-
-                      _startRecord();
-                    },
-                    child: const Text('Start', style: TextStyle(fontSize: 30)),
-                  ),
-                  const SizedBox(width: 5),
-                  OutlinedButton(
-                    style: ButtonStyle(
-                      backgroundColor:
-                          MaterialStateProperty.all<Color>(Colors.red),
-                      foregroundColor:
-                          MaterialStateProperty.all<Color>(Colors.white),
-                    ),
-                    onPressed: () {
-                      _stopRecord();
-                    },
-                    child: const Text('Stop', style: TextStyle(fontSize: 30)),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
